@@ -399,3 +399,160 @@ def json_output(data, args=None, pretty=None):
         pretty = is_pretty(args)
     indent = 2 if pretty else None
     print(json.dumps(data, indent=indent, default=str))
+
+
+# ── FID-to-path resolution ───────────────────────────────────
+
+
+def dentry_path(prog: drgn.Program, dentry: drgn.Object) -> str:
+    """Walk d_parent chain to build full path string.
+
+    Stops at mount root (where d_parent == self). Returns the
+    reconstructed path or "/" if dentry is the root.
+    """
+    components = []
+    seen = set()
+    d = dentry
+    try:
+        while True:
+            addr = d.value_() if hasattr(d, 'value_') else int(d)
+            if addr in seen:
+                break
+            seen.add(addr)
+
+            parent = d.d_parent
+            parent_addr = parent.value_() if hasattr(parent, 'value_') else int(parent)
+
+            # At mount root, d_parent points to self
+            if parent_addr == addr:
+                break
+
+            name = d.d_name.name.string_().decode(errors="replace")
+            if name:
+                components.append(name)
+            d = parent
+    except drgn.FaultError:
+        pass
+
+    if not components:
+        return "/"
+    components.reverse()
+    return "/" + "/".join(components)
+
+
+def inode_to_path(prog: drgn.Program, inode: drgn.Object) -> str:
+    """Given a VFS inode, try to find a dentry via i_dentry hlist.
+
+    Returns path string or None if no cached dentry exists.
+    """
+    try:
+        for dentry in hlist_for_each_entry(
+            "struct dentry", inode.i_dentry, "d_u.d_alias"
+        ):
+            path = dentry_path(prog, dentry)
+            if path:
+                return path
+    except (drgn.FaultError, AttributeError, TypeError):
+        pass
+    return None
+
+
+def build_fid_path_cache(prog: drgn.Program,
+                         max_inodes: int = 10000) -> dict:
+    """Iterate all Lustre superblocks and build FID->path cache.
+
+    Walks s_inodes for each superblock whose s_type->name is
+    "lustre", extracts the FID from ll_inode_info.lli_fid, and
+    resolves paths via the dentry cache.
+
+    Returns dict mapping "seq:oid:ver" -> path string.
+    Only includes inodes that have cached dentries.
+    """
+    cache = {}
+    count = 0
+
+    try:
+        # Iterate the global super_blocks list
+        super_blocks = prog["super_blocks"]
+    except (KeyError, drgn.FaultError):
+        return cache
+
+    try:
+        for sb in list_for_each_entry(
+            "struct super_block", super_blocks.address_of_(), "s_list"
+        ):
+            # Check if this is a Lustre filesystem
+            try:
+                fs_name = sb.s_type.name.string_().decode(errors="replace")
+                if fs_name != "lustre":
+                    continue
+            except (drgn.FaultError, AttributeError):
+                continue
+
+            # Walk s_inodes for this superblock
+            try:
+                for inode in list_for_each_entry(
+                    "struct inode", sb.s_inodes.address_of_(), "i_sb_list"
+                ):
+                    if count >= max_inodes:
+                        break
+                    count += 1
+
+                    try:
+                        # container_of(inode, struct ll_inode_info,
+                        #              lli_vfs_inode)
+                        lli = drgn.container_of(inode, "struct ll_inode_info",
+                                                "lli_vfs_inode")
+                        fid = lli.lli_fid
+                        seq = fid.f_seq.value_()
+                        oid = fid.f_oid.value_()
+                        ver = fid.f_ver.value_()
+
+                        # Skip zero FIDs
+                        if seq == 0 and oid == 0:
+                            continue
+
+                        path = inode_to_path(prog, inode)
+                        if path is None:
+                            continue
+
+                        fid_str = f"{seq:#x}:{oid:#x}:{ver:#x}"
+                        cache[fid_str] = path
+                    except (drgn.FaultError, AttributeError):
+                        continue
+            except (drgn.FaultError, AttributeError):
+                continue
+
+            if count >= max_inodes:
+                break
+    except (drgn.FaultError, AttributeError):
+        pass
+
+    return cache
+
+
+def fid_to_path(fid_cache: dict, seq: int, oid: int, ver: int) -> str:
+    """Look up a FID in the cache dict.
+
+    Returns the path string or None if the FID is not cached.
+    """
+    fid_str = f"{seq:#x}:{oid:#x}:{ver:#x}"
+    return fid_cache.get(fid_str)
+
+
+def resource_name_to_fid_str(res_name_parts: list) -> str:
+    """Convert LDLM resource name to a FID string.
+
+    For MDT resources, the resource name IS the FID:
+      name[0] = f_seq, name[1] = f_oid, name[2] = f_ver.
+
+    Args:
+        res_name_parts: list/tuple of the 4 __u64 resource name values
+
+    Returns:
+        FID string in "seq:oid:ver" hex format
+    """
+    seq = int(res_name_parts[0])
+    oid = int(res_name_parts[1])
+    ver = int(res_name_parts[2])
+    return f"{seq:#x}:{oid:#x}:{ver:#x}"

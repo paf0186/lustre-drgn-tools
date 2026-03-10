@@ -177,6 +177,32 @@ COMMANDS = {
                                 "help": "Only wait-for graph + cycles"}),
         ],
     },
+    "imports": {
+        "module": "import_health",
+        "description": "Import health dashboard (state, reconnects, RPCs)",
+        "detail": (
+            "Aggregates per-target connection health: import state,\n"
+            "reconnect count, in-flight RPCs, adaptive timeouts,\n"
+            "and flags. Assigns health status (healthy, degraded,\n"
+            "reconnecting, disconnected, idle) and sorts worst-first."
+        ),
+        "extra_args": [],
+    },
+    "stripes": {
+        "module": "stripe_layout",
+        "description": "Reconstruct file/directory stripe layouts",
+        "detail": (
+            "Extracts LOV file and LMV directory stripe layouts from\n"
+            "cached Lustre inodes. Shows composite/PFL components,\n"
+            "stripe sizes, OST/MDT indices, DoM, FLR mirrors, and\n"
+            "resolves paths from the dentry cache where possible."
+        ),
+        "extra_args": [
+            (["--max-inodes"], {"type": int, "default": 10000,
+                                "help": "Max inodes to scan "
+                                        "(default: 10000)"}),
+        ],
+    },
 }
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -316,6 +342,17 @@ def run_command(cmd_name, prog, args, text_mode):
             result = mod.analyze_all(prog)
         if text_mode:
             mod.print_analysis_text(result)
+            return None
+    elif cmd_name == "imports":
+        result = mod.get_import_health(prog)
+        if text_mode:
+            mod.print_health_text(result)
+            return None
+    elif cmd_name == "stripes":
+        max_inodes = getattr(args, "max_inodes", 10000)
+        result = mod.get_stripe_layouts(prog, max_inodes=max_inodes)
+        if text_mode:
+            mod.print_layouts_text(result)
             return None
     else:
         print(f"Unknown command: {cmd_name}", file=sys.stderr)
