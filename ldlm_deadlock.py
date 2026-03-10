@@ -218,6 +218,29 @@ def _resource_name(res):
         return "<unknown>"
 
 
+def _resource_fid_parts(res):
+    """Get raw resource name parts as ints (for FID lookup)."""
+    try:
+        n = res.lr_name.name
+        return [n[i].value_() for i in range(4)]
+    except (drgn.FaultError, drgn.ObjectAbsentError, AttributeError):
+        return None
+
+
+def _enrich_with_path(info_dict, res, fid_cache):
+    """Add a 'path' field to info_dict if the resource FID is cached."""
+    if not fid_cache:
+        return
+    parts = _resource_fid_parts(res)
+    if parts is None:
+        return
+    fid_str = lh.resource_name_to_fid_str(parts)
+    path = fid_cache.get(fid_str)
+    if path:
+        info_dict["path"] = path
+        info_dict["fid"] = fid_str
+
+
 def _resource_type_str(res):
     """Get resource type string."""
     try:
@@ -293,7 +316,7 @@ def _find_conflicts_on_resource(res):
 # ── Wait-for graph and cycle detection ───────────────────────
 
 
-def _build_wait_for_graph(prog):
+def _build_wait_for_graph(prog, fid_cache=None):
     """Build a wait-for graph from all namespaces.
 
     Nodes are export addresses (clients). An edge from A to B means
@@ -331,7 +354,7 @@ def _build_wait_for_graph(prog):
                     res = drgn.Object(
                         prog, "struct ldlm_resource", address=res_addr)
                     _process_resource_for_graph(
-                        res, graph, node_info, edges)
+                        res, graph, node_info, edges, fid_cache)
                 except (drgn.FaultError, drgn.ObjectAbsentError):
                     continue
 
@@ -341,7 +364,8 @@ def _build_wait_for_graph(prog):
     return graph, node_info, edges
 
 
-def _process_resource_for_graph(res, graph, node_info, edges):
+def _process_resource_for_graph(res, graph, node_info, edges,
+                                fid_cache=None):
     """Process one resource: add edges from waiters to holders."""
     # Collect granted locks with export info
     granted = []
@@ -383,6 +407,14 @@ def _process_resource_for_graph(res, graph, node_info, edges):
     res_name = _resource_name(res)
     res_type = _resource_type_str(res)
 
+    # Resolve path once per resource
+    res_path = None
+    if fid_cache:
+        parts = _resource_fid_parts(res)
+        if parts:
+            fid_str = lh.resource_name_to_fid_str(parts)
+            res_path = fid_cache.get(fid_str)
+
     for wlock in list_for_each_entry(
         "struct ldlm_lock", res.lr_waiting.address_of_(), "l_res_link"
     ):
@@ -403,7 +435,7 @@ def _process_resource_for_graph(res, graph, node_info, edges):
                 continue  # Same client — not a cross-client conflict
             if not lockmode_compat(gmode, w_mode):
                 graph[w_exp].add(g_exp)
-                edges.append({
+                edge = {
                     "waiter_export": f"0x{w_exp:x}",
                     "holder_export": f"0x{g_exp:x}",
                     "resource": res_name,
@@ -416,7 +448,10 @@ def _process_resource_for_graph(res, graph, node_info, edges):
                     "holder_cookie": _safe_val(
                         lambda l=glock: f"0x{l.l_handle.h_cookie.value_():x}",
                         "?"),
-                })
+                }
+                if res_path:
+                    edge["path"] = res_path
+                edges.append(edge)
 
 
 def _find_cycles(graph):
@@ -603,11 +638,12 @@ def _check_blocking_locks(prog, res, ns_name, chains):
 # ── Top-level analysis functions ─────────────────────────────
 
 
-def analyze_conflicts(prog):
+def analyze_conflicts(prog, fid_cache=None):
     """Per-resource conflict analysis across all namespaces.
 
     Returns resources that have both granted and waiting locks with
-    mode conflicts.
+    mode conflicts.  If fid_cache is provided, enriches output with
+    file paths resolved from the dentry cache.
     """
     contended = []
 
@@ -637,14 +673,16 @@ def analyze_conflicts(prog):
                         prog, "struct ldlm_resource", address=res_addr)
                     conflicts = _find_conflicts_on_resource(res)
                     if conflicts:
-                        contended.append({
+                        entry = {
                             "namespace": ns_name,
                             "namespace_side": side,
                             "resource": _resource_name(res),
                             "resource_type": _resource_type_str(res),
                             "resource_addr": f"0x{res_addr:x}",
                             "conflicts": conflicts,
-                        })
+                        }
+                        _enrich_with_path(entry, res, fid_cache)
+                        contended.append(entry)
                 except (drgn.FaultError, drgn.ObjectAbsentError):
                     continue
 
@@ -653,13 +691,13 @@ def analyze_conflicts(prog):
     return contended
 
 
-def analyze_deadlocks(prog):
+def analyze_deadlocks(prog, fid_cache=None):
     """Build wait-for graph and detect cycles (deadlocks).
 
     Returns dict with the graph edges, detected cycles, and
     node information.
     """
-    graph, node_info, edges = _build_wait_for_graph(prog)
+    graph, node_info, edges = _build_wait_for_graph(prog, fid_cache)
     cycles_raw = _find_cycles(graph)
 
     # Format cycles with node info
@@ -693,13 +731,18 @@ def analyze_all(prog):
     """Run all deadlock/contention analyses and return combined result."""
     result = {"analysis": "ldlm_deadlock"}
 
+    # Build FID->path cache once for all analyses (client vmcores only)
+    fid_cache = lh.build_fid_path_cache(prog)
+    if fid_cache:
+        result["fid_paths_resolved"] = len(fid_cache)
+
     # 1. Wait-for graph and cycle detection
-    wfg = analyze_deadlocks(prog)
+    wfg = analyze_deadlocks(prog, fid_cache)
     result["wait_for_graph"] = wfg
     result["deadlock_detected"] = wfg["deadlock_detected"]
 
     # 2. Per-resource conflict detail
-    result["contended_resources"] = analyze_conflicts(prog)
+    result["contended_resources"] = analyze_conflicts(prog, fid_cache)
     result["contended_resource_count"] = len(result["contended_resources"])
 
     # 3. BL_AST timeout analysis
@@ -800,8 +843,10 @@ def print_analysis_text(result):
         print(f"Contended Resources: {len(contended)}")
         print("-" * 60)
         for res in contended:
+            path_str = f" ({res['path']})" if "path" in res else ""
             print(f"  {res['namespace']} ({res['namespace_side']}) "
-                  f"res={res['resource']} type={res['resource_type']}")
+                  f"res={res['resource']} type={res['resource_type']}"
+                  f"{path_str}")
             for conflict in res["conflicts"]:
                 wl = conflict["waiting_lock"]
                 w_nid = wl.get("client_nid",
@@ -829,9 +874,10 @@ def print_analysis_text(result):
         for edge in edges:
             w_info = nodes.get(edge["waiter_export"], {})
             h_info = nodes.get(edge["holder_export"], {})
+            res_label = edge.get("path", edge["resource"])
             print(f"  {w_info.get('nid', '?')} "
                   f"--({edge['waiter_mode']} vs {edge['holder_mode']} "
-                  f"on {edge['resource']})--> "
+                  f"on {res_label})--> "
                   f"{h_info.get('nid', '?')}")
 
     print()

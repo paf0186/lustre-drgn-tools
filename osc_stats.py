@@ -69,7 +69,18 @@ def get_osc_stats(prog):
             except (drgn.FaultError, AttributeError):
                 pass
 
-            results.append({
+            # Grant sanity checks
+            warnings = []
+            if granted < 0:
+                warnings.append("negative avail_grant")
+            if lost_grant != 0:
+                warnings.append(f"lost_grant={lost_grant}")
+            if dirty_pages > 0 and dirty_grant == 0:
+                warnings.append("dirty pages but no dirty grant")
+            if dirty_grant < 0:
+                warnings.append("negative dirty_grant")
+
+            entry = {
                 "name": name,
                 "avail_grant": granted,
                 "dirty_grant": dirty_grant,
@@ -78,16 +89,24 @@ def get_osc_stats(prog):
                 "max_pages_per_rpc": max_pages,
                 "max_rpcs_in_flight": max_rpcs,
                 "import_state": imp_state,
-            })
+            }
+            if warnings:
+                entry["warnings"] = warnings
+            results.append(entry)
 
         except (drgn.FaultError, drgn.ObjectAbsentError, AttributeError):
             continue
 
-    return {
+    sorted_devs = sorted(results, key=lambda x: x["name"])
+    warn_count = sum(1 for d in sorted_devs if d.get("warnings"))
+    result = {
         "analysis": "osc_stats",
-        "count": len(results),
-        "devices": sorted(results, key=lambda x: x["name"]),
+        "count": len(sorted_devs),
+        "devices": sorted_devs,
     }
+    if warn_count:
+        result["devices_with_warnings"] = warn_count
+    return result
 
 
 def print_stats_text(result):
@@ -101,11 +120,19 @@ def print_stats_text(result):
     print("=" * 105)
 
     for dev in result["devices"]:
+        warn_flag = " !" if dev.get("warnings") else ""
         print(f"{dev['name']:<45s} {dev['import_state']:<8s} "
               f"{dev['avail_grant']:>12d} {dev['dirty_grant']:>12d} "
-              f"{dev['dirty_pages']:>8d} {dev['lost_grant']:>12d}")
+              f"{dev['dirty_pages']:>8d} {dev['lost_grant']:>12d}"
+              f"{warn_flag}")
 
+    warn_count = result.get("devices_with_warnings", 0)
     print(f"\nTotal: {result['count']} OSC devices")
+    if warn_count:
+        print(f"\nWARNINGS ({warn_count} device(s)):")
+        for dev in result["devices"]:
+            if dev.get("warnings"):
+                print(f"  {dev['name']}: {'; '.join(dev['warnings'])}")
 
 
 def main():
