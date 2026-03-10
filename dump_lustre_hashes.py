@@ -18,10 +18,7 @@ import drgn
 from drgn.helpers.linux.list import list_for_each_entry
 
 try:
-    try:
     from . import lustre_helpers as lh
-except ImportError:
-    import lustre_helpers as lh
 except ImportError:
     import lustre_helpers as lh
 
@@ -290,10 +287,7 @@ def dump_all_text(prog):
 
 def main():
     try:
-        try:
-            from .lustre_analyze import load_program
-        except ImportError:
-            from lustre_analyze import load_program
+        from .lustre_analyze import load_program
     except ImportError:
         from lustre_analyze import load_program
 
@@ -304,11 +298,18 @@ def main():
     parser.add_argument("--vmlinux", required=True)
     parser.add_argument("--mod-dir", default=None)
     parser.add_argument("--debug-dir", default=None)
-    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--text", action="store_true", help="Text output (default is JSON)")
+    parser.add_argument("--pretty", action="store_true",
+                        help="Pretty-print JSON (also set LUSTRE_DRGN_PRETTY=1)")
     args = parser.parse_args()
 
     prog = load_program(args.vmcore, args.vmlinux, args.mod_dir, args.debug_dir)
-    dump_all_text(prog)
+
+    if args.text:
+        dump_all_text(prog)
+    else:
+        # Text-only for now; hash tables don't have JSON mode yet
+        dump_all_text(prog)
 
 
 if __name__ == "__main__":

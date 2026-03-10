@@ -8,6 +8,9 @@ Original: contrib/debug_tools/epython_scripts/lustrelib.py
 Authors: Ann Koehler (Cray Inc.), ported to drgn by Claude.
 """
 
+import json
+import os
+
 import drgn
 from drgn.helpers.linux.list import (
     hlist_for_each_entry,
@@ -345,3 +348,54 @@ RPC_OPCODES = {
 
 def opc2str(opc: int) -> str:
     return RPC_OPCODES.get(opc, f"UNKNOWN({opc})")
+
+
+# ── Import state ─────────────────────────────────────────────
+
+IMP_STATE = {
+    1: "CLOSED",
+    2: "NEW",
+    3: "DISCON",
+    4: "CONNECTING",
+    5: "REPLAY",
+    6: "REPLAY_LOCKS",
+    7: "REPLAY_WAIT",
+    8: "RECOVER",
+    9: "FULL",
+    10: "EVICTED",
+    11: "IDLE",
+}
+
+
+def imp_state2str(state: int) -> str:
+    return IMP_STATE.get(state, f"?({state})")
+
+
+# ── Output helpers ───────────────────────────────────────────
+
+
+def is_pretty(args=None):
+    """Check if pretty output is requested via --pretty flag or env var.
+
+    Checks (in order):
+    1. args.pretty if args is provided and has the attribute
+    2. LUSTRE_DRGN_PRETTY env var (any truthy value: 1, true, yes)
+    """
+    if args is not None and getattr(args, "pretty", False):
+        return True
+    env = os.environ.get("LUSTRE_DRGN_PRETTY", "").lower()
+    return env in ("1", "true", "yes")
+
+
+def json_output(data, args=None, pretty=None):
+    """Print data as JSON. Default output format for all scripts.
+
+    Args:
+        data: dict/list to serialize
+        args: argparse namespace (checked for .pretty)
+        pretty: explicit override (True/False), or None to auto-detect
+    """
+    if pretty is None:
+        pretty = is_pretty(args)
+    indent = 2 if pretty else None
+    print(json.dumps(data, indent=indent, default=str))

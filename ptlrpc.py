@@ -16,11 +16,9 @@ import drgn
 from drgn.helpers.linux.list import list_for_each_entry
 
 try:
-    try:
     from . import lustre_helpers as lh
 except ImportError:
     import lustre_helpers as lh
-except ImportError:
     import lustre_helpers as lh
 
 
@@ -340,10 +338,7 @@ def get_rpcs_json(prog):
 
 def main():
     try:
-        try:
-            from .lustre_analyze import load_program
-        except ImportError:
-            from lustre_analyze import load_program
+        from .lustre_analyze import load_program
     except ImportError:
         from lustre_analyze import load_program
 
@@ -358,22 +353,23 @@ def main():
                         help="Print overview of ptlrpcd threads")
     parser.add_argument("-s", dest="sflag", action="store_true",
                         help="Print RPC counts per ptlrpc_request_set")
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--text", action="store_true", help="Text output (default is JSON)")
+    parser.add_argument("--pretty", action="store_true",
+                        help="Pretty-print JSON (also set LUSTRE_DRGN_PRETTY=1)")
     args = parser.parse_args()
 
     prog = load_program(args.vmcore, args.vmlinux, args.mod_dir, args.debug_dir)
 
-    if args.json:
-        result = get_rpcs_json(prog)
-        indent = 2 if args.pretty else None
-        print(json.dumps(result, indent=indent, default=str))
-    elif args.oflag:
-        dump_overview_text(prog)
-    elif args.sflag:
-        dump_pcsets_text(prog)
+    if args.text:
+        if args.oflag:
+            dump_overview_text(prog)
+        elif args.sflag:
+            dump_pcsets_text(prog)
+        else:
+            dump_daemon_rpclists_text(prog)
     else:
-        dump_daemon_rpclists_text(prog)
+        result = get_rpcs_json(prog)
+        lh.json_output(result, args)
 
 
 if __name__ == "__main__":

@@ -123,10 +123,7 @@ def get_traces_json(traces):
 
 def main():
     try:
-        try:
-            from .lustre_analyze import load_program
-        except ImportError:
-            from lustre_analyze import load_program
+        from .lustre_analyze import load_program
     except ImportError:
         from lustre_analyze import load_program
 
@@ -146,8 +143,9 @@ def main():
     parser.add_argument("-f", "--filter", default=None,
                         choices=["UN", "RU"],
                         help="Filter tasks by state (UN=uninterruptible, RU=running)")
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--text", action="store_true", help="Text output (default is JSON)")
+    parser.add_argument("--pretty", action="store_true",
+                        help="Pretty-print JSON (also set LUSTRE_DRGN_PRETTY=1)")
     args = parser.parse_args()
 
     prog = load_program(args.vmcore, args.vmlinux, args.mod_dir, args.debug_dir)
@@ -158,12 +156,15 @@ def main():
         task_filter=args.filter,
     )
 
-    if args.json:
-        result = get_traces_json(traces)
-        indent = 2 if args.pretty else None
-        print(json.dumps(result, indent=indent, default=str))
-    else:
+    if args.text:
         print_traces_text(traces, args.print_pid, args.print_taskpntr)
+    else:
+        try:
+            from . import lustre_helpers as _lh
+        except ImportError:
+            import lustre_helpers as _lh
+        result = get_traces_json(traces)
+        _lh.json_output(result, args)
 
 
 if __name__ == "__main__":

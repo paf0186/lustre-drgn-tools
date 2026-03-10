@@ -279,10 +279,7 @@ def dump_dk_json(prog):
 
 def main():
     try:
-        try:
-            from .lustre_analyze import load_program
-        except ImportError:
-            from lustre_analyze import load_program
+        from .lustre_analyze import load_program
     except ImportError:
         from lustre_analyze import load_program
 
@@ -296,18 +293,22 @@ def main():
     parser.add_argument("--debug-dir", default=None)
     parser.add_argument("-o", "--output", default=None,
                         help="Write dk log to file instead of stdout")
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--text", action="store_true", help="Text output (default is JSON)")
+    parser.add_argument("--pretty", action="store_true",
+                        help="Pretty-print JSON (also set LUSTRE_DRGN_PRETTY=1)")
     args = parser.parse_args()
 
     prog = load_program(args.vmcore, args.vmlinux, args.mod_dir, args.debug_dir)
 
-    if args.json:
-        result = dump_dk_json(prog)
-        indent = 2 if args.pretty else None
-        print(json.dumps(result, indent=indent, default=str))
-    else:
+    if args.text or args.output:
         sys.exit(dump_dk_text(prog, args.output))
+    else:
+        try:
+            from . import lustre_helpers as _lh
+        except ImportError:
+            import lustre_helpers as _lh
+        result = dump_dk_json(prog)
+        _lh.json_output(result, args)
 
 
 if __name__ == "__main__":

@@ -15,10 +15,7 @@ import sys
 import drgn
 
 try:
-    try:
     from . import lustre_helpers as lh
-except ImportError:
-    import lustre_helpers as lh
 except ImportError:
     import lustre_helpers as lh
 
@@ -153,10 +150,7 @@ def get_devices_json(prog, obd_addr=None):
 
 def main():
     try:
-        try:
-            from .lustre_analyze import load_program
-        except ImportError:
-            from lustre_analyze import load_program
+        from .lustre_analyze import load_program
     except ImportError:
         from lustre_analyze import load_program
 
@@ -167,19 +161,19 @@ def main():
     parser.add_argument("--vmlinux", required=True)
     parser.add_argument("--mod-dir", default=None)
     parser.add_argument("--debug-dir", default=None)
-    parser.add_argument("--json", action="store_true", help="JSON output")
-    parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--text", action="store_true", help="Text output (default is JSON)")
+    parser.add_argument("--pretty", action="store_true",
+                        help="Pretty-print JSON (also set LUSTRE_DRGN_PRETTY=1)")
     parser.add_argument("obd_device", nargs="?", default=None, type=lambda x: int(x, 0))
     args = parser.parse_args()
 
     prog = load_program(args.vmcore, args.vmlinux, args.mod_dir, args.debug_dir)
 
-    if args.json:
-        result = get_devices_json(prog, args.obd_device)
-        indent = 2 if args.pretty else None
-        print(json.dumps(result, indent=indent, default=str))
-    else:
+    if args.text:
         print_devices_text(prog, args.obd_device)
+    else:
+        result = get_devices_json(prog, args.obd_device)
+        lh.json_output(result, args)
 
 
 if __name__ == "__main__":
