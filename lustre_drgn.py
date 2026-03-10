@@ -160,6 +160,23 @@ COMMANDS = {
         ),
         "extra_args": [],
     },
+    "deadlock": {
+        "module": "ldlm_deadlock",
+        "description": "LDLM deadlock and lock contention analyzer",
+        "detail": (
+            "Builds a wait-for graph from LDLM lock state and detects\n"
+            "cycles (deadlocks), blocking chains, and BL_AST timeouts.\n"
+            "Analyses: per-resource conflicts, cross-client wait-for\n"
+            "graph with cycle detection, l_blocking_lock chain tracing,\n"
+            "and server-side BL_AST timeout monitoring."
+        ),
+        "extra_args": [
+            (["--conflicts-only"], {"action": "store_true",
+                                    "help": "Only per-resource conflicts"}),
+            (["--graph-only"], {"action": "store_true",
+                                "help": "Only wait-for graph + cycles"}),
+        ],
+    },
 }
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -283,6 +300,22 @@ def run_command(cmd_name, prog, args, text_mode):
         result = mod.get_osc_stats(prog)
         if text_mode:
             mod.print_stats_text(result)
+            return None
+    elif cmd_name == "deadlock":
+        if getattr(args, "conflicts_only", False):
+            result = {
+                "analysis": "ldlm_conflicts",
+                "contended_resources": mod.analyze_conflicts(prog),
+            }
+        elif getattr(args, "graph_only", False):
+            result = {
+                "analysis": "ldlm_wait_for_graph",
+                "wait_for_graph": mod.analyze_deadlocks(prog),
+            }
+        else:
+            result = mod.analyze_all(prog)
+        if text_mode:
+            mod.print_analysis_text(result)
             return None
     else:
         print(f"Unknown command: {cmd_name}", file=sys.stderr)
