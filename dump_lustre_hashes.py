@@ -285,6 +285,162 @@ def dump_all_text(prog):
     dump_ldlm_ns_hashes(prog)
 
 
+# ── JSON output helpers ──────────────────────────────────────
+
+
+def _cfs_hash_to_dict(prog, name, hsh_ptr):
+    """Return a dict summarizing one cfs_hash, or None on error."""
+    if hsh_ptr.value_() == 0:
+        return {"name": name, "type": "cfs_hash", "error": "NULL"}
+
+    try:
+        hsh = hsh_ptr[0]
+        cur_theta = cfs_hash_cur_theta(hsh)
+        return {
+            "name": name,
+            "type": "cfs_hash",
+            "address": f"0x{hsh_ptr.value_():x}",
+            "count": hsh.hs_count.counter.value_(),
+            "cur_bits": hsh.hs_cur_bits.value_(),
+            "min_bits": hsh.hs_min_bits.value_(),
+            "max_bits": hsh.hs_max_bits.value_(),
+            "bkt_cnt": lh.cfs_hash_nbkt(hsh),
+            "flags": f"0x{hsh.hs_flags.value_():x}",
+            "theta": cfs_hash_format_theta(cur_theta),
+            "min_theta": cfs_hash_format_theta(
+                hsh.hs_min_theta.value_()),
+            "max_theta": cfs_hash_format_theta(
+                hsh.hs_max_theta.value_()),
+        }
+    except (drgn.FaultError, drgn.ObjectAbsentError,
+            AttributeError) as e:
+        return {"name": name, "type": "cfs_hash",
+                "address": f"0x{hsh_ptr.value_():x}",
+                "error": str(e)}
+
+
+def _hash_to_dict(prog, name, obj):
+    """Auto-detect hash type and return a summary dict."""
+    if _is_rhashtable(obj):
+        return get_rhashtable_summary(name, obj)
+    return _cfs_hash_to_dict(prog, name, obj.address_of_())
+
+
+def _collect_global_hashes(prog):
+    """Return list of dicts for global hash tables."""
+    results = []
+    for sym_name in ["conn_hash", "jobid_hash", "cl_env_hash"]:
+        try:
+            obj = prog[sym_name]
+            results.append(_hash_to_dict(prog, sym_name, obj))
+        except (KeyError, LookupError):
+            pass
+    return results
+
+
+def _collect_obd_hashes(prog):
+    """Return list of per-OBD hash table dicts."""
+    results = []
+    for idx, obd in lh.get_obd_devices(prog):
+        name = lh.obd_name(obd)
+        addr = obd.address_of_().value_()
+        entry = {
+            "obd_device": f"0x{addr:x}",
+            "name": name,
+            "hashes": [],
+        }
+
+        for field_name, label in [
+            ("obd_uuid_hash", "uuid"),
+            ("obd_nid_hash", "nid"),
+            ("obd_nid_stats_hash", "nid_stats"),
+        ]:
+            try:
+                field = getattr(obd, field_name)
+                entry["hashes"].append(
+                    _hash_to_dict(prog, label, field))
+            except (drgn.FaultError, AttributeError):
+                pass
+
+        if "clilov" in name:
+            try:
+                entry["hashes"].append(_cfs_hash_to_dict(
+                    prog, "lov_pools",
+                    obd.u.lov.lov_pools_hash_body.address_of_()))
+            except (drgn.FaultError, AttributeError):
+                pass
+        elif "clilmv" not in name:
+            try:
+                for i in range(2):
+                    qh = obd.u.cli.cl_quota_hash[i]
+                    entry["hashes"].append(
+                        _hash_to_dict(prog, f"cl_quota{i}", qh))
+            except (drgn.FaultError, AttributeError):
+                pass
+
+        results.append(entry)
+    return results
+
+
+def _collect_ldlm_ns_hashes(prog):
+    """Return list of LDLM namespace hash dicts."""
+    ns_lists = [
+        ("ldlm_cli_active_namespace_list", "client_active"),
+        ("ldlm_cli_inactive_namespace_list", "client_inactive"),
+        ("ldlm_srv_namespace_list", "server"),
+    ]
+    results = []
+    for ns_sym, label in ns_lists:
+        try:
+            ns_list = prog[ns_sym]
+        except (KeyError, LookupError):
+            continue
+
+        for ns in list_for_each_entry(
+            "struct ldlm_namespace",
+            ns_list.address_of_(), "ns_list_chain"
+        ):
+            try:
+                ns_name = (lh.obd_name(ns.ns_obd[0])[:20]
+                           if ns.ns_obd.value_() != 0 else "?")
+                rs_hash = ns.ns_rs_hash
+                d = _hash_to_dict(prog, ns_name, rs_hash)
+                d["ns_type"] = label
+                results.append(d)
+            except (drgn.FaultError, AttributeError):
+                continue
+    return results
+
+
+def _collect_lu_sites_hashes(prog):
+    """Return list of lu_site hash dicts."""
+    results = []
+    try:
+        lu_sites = prog["lu_sites"]
+    except (KeyError, LookupError):
+        return results
+
+    for site in list_for_each_entry(
+        "struct lu_site", lu_sites.address_of_(), "ls_linkage"
+    ):
+        try:
+            ls_obj = site.ls_obj_hash
+            results.append(_hash_to_dict(prog, "lu_site", ls_obj))
+        except (drgn.FaultError, AttributeError):
+            continue
+    return results
+
+
+def dump_all_json(prog):
+    """Return a structured dict with all hash table summaries."""
+    return {
+        "global_hashes": _collect_global_hashes(prog),
+        "lu_site_hashes": _collect_lu_sites_hashes(prog),
+        "obd_hashes": _collect_obd_hashes(prog),
+        "ldlm_namespace_hashes": _collect_ldlm_ns_hashes(prog),
+    }
+
+
 def main():
     try:
         from .lustre_analyze import load_program
@@ -308,8 +464,8 @@ def main():
     if args.text:
         dump_all_text(prog)
     else:
-        # Text-only for now; hash tables don't have JSON mode yet
-        dump_all_text(prog)
+        result = dump_all_json(prog)
+        lh.json_output(result, args)
 
 
 if __name__ == "__main__":
