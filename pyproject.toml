@@ -9,6 +9,9 @@ description = "Drgn-based Lustre vmcore analysis tools"
 requires-python = ">=3.8"
 dependencies = ["drgn"]
 
+[project.scripts]
+lustre-drgn = "lustre_drgn_tools.lustre_drgn:main"
+
 [tool.setuptools]
 packages = ["lustre_drgn_tools"]
 
